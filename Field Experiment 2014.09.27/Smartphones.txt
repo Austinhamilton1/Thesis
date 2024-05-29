@@ -1,0 +1,22 @@
+Smartphones per vehicle
+
+ID1 Seat Leon:
+SR Nexus 4 (position windshield; orientation landscape, back camera facing forward)
+SMC Nexus 4 (position dashboard)
+
+ID2 Audi A4:
+SR Nexus 4 (position windshield; orientation landscape, back camera facing forward)
+SMC Nexus 4 (position dashboard)
+
+ID3 Nissan Micra:
+SR Nexus 4 (position windshield; orientation landscape, back camera facing forward)
+SMC Nexus 5 (position dashboard)
+
+ID4 Fiat Punto:
+SR Nexus 4 (position windshield; orientation landscape, back camera facing forward)
+SMC Nexus 5 (position dashboard)
+
+Data collection app:
+SR - SensorReader
+SMC - SenseMyCity
+ 
