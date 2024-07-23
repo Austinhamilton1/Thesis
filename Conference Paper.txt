@@ -1,0 +1,17 @@
+Abstract
+
+Introduction
+
+	Vehicular social networks (VSNs) are special types of social network that are described by ​[]​ as “decentralized opportunistic communication networks formed among vehicles.” These networks combine three dimensions of communication, namely human-human communication, human-vehicle communication, and vehicle-vehicle communication. Within VSNs, large amounts of data are shared between actors, especially within the vehicle-vehicle realm. The vehicle-vehicle realm of VSNs essentially acts as a dynamic wireless sensor network, with vehicles broadcasting their location, velocity, connection status, etc. at regular intervals to neighboring vehicles.
+	 With the advent of self-driving vehicles, vehicles are becoming more reliant on this steady stream of information to make executive decisions. A decision like determining when to stop or slow down involves analyzing the behaviors of neighboring vehicles. This behavioral analysis is based on the data received from other vehicles that are within the subnetwork of the deciding car. It becomes clear to see that in order to make proper decisions, vehicles must ensure that the data received by another vehicle is valid data.
+	 When an actor within the VSN begins transmitting incorrect data - e.g., the result of a faulty sensor or cyber attack - other vehicles must be able to identify this vehicle as an anomalous node and ignore incoming data sent by this vehicle. The work presented in this paper faces this issue and provides a framework for anomalous node detection within vehicular social networks. The remainder of the paper is presented as follows. Section II provides background in the field with related works in anomalous node detection. Section III presents the problem definition, as well as the mathematical foundations of the solution. Section IV gives the proposed solution, with an overview of the architecture and the overall algorithm to identify anomalous nodes within VSNs. Section V explores the experiment used to validate the work of this paper, and section VI provides a conclusion and explores future work that can use this work as a basis.
+
+Related Work
+
+Problem Definition
+
+Proposed Method
+
+Experiments
+
+Conclusion and Future Work
