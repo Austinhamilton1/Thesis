@@ -1,9 +1,14 @@
 import pandas as pd
 import os
-from math import radians, sin, cos, asin, sqrt, isnan
-import networkx as nx
+from math import radians, sin, cos, asin, sqrt
 from tqdm import tqdm
-import csv
+import numpy as np
+
+import torch
+import torch.nn.functional as F
+from torch.nn import Sequential, Linear, ReLU
+from torch_geometric_temporal.nn.recurrent import DCRNN
+from torch_geometric_temporal.signal import DynamicGraphTemporalSignal
 
 def find_file(base_path: str, filename: str) -> str:
     '''
@@ -39,9 +44,21 @@ def read_data(filename: str) -> pd.DataFrame:
     df = pd.read_csv(file_path, delimiter='\t', header=0)
     #drop any rows where the gps time is NaN (can't use these)
     df = df.drop(df[df.gpstime == '?'].index)
+    df = df.drop(df[df.latitude == '?'].index)
+    df = df.drop(df[df.longitude == '?'].index)
+    df = df.drop(df[df.altitude == '?'].index)
+    df = df.drop(df[df.speed == '?'].index)
+    df = df.drop(df[df.heading == '?'].index)
     #due to the format of the gpstime float we have to convert to a float before converting
     #to an int
-    df = df.astype({'gpstime': float, 'latitude': float, 'longitude': float})
+    df = df.astype({
+        'gpstime': float,
+        'latitude': float, 
+        'longitude': float, 
+        'altitude': float,
+        'speed': float,
+        'heading': float,
+    })
     df = df.astype({'gpstime': int})
     #drop systime, we are only interested in gpstime
     df = df.drop(['systime'], axis=1)
@@ -92,7 +109,7 @@ def earth_distance(lat_lon_1: 'tuple[float]', lat_lon_2: 'tuple[float]'):
 
     return c * R
     
-def generate_dynamic_graph(car_data: pd.DataFrame, threshold: float=15.0) -> nx.Graph:
+def generate_dynamic_graph(car_data: pd.DataFrame, threshold: float=15.0) -> dict:
     '''
     Generates a dynamic graph from car data. This data should be collected and merged prior
     to being used as input. The algorithm adds a node for each car at each timestep if the 
@@ -100,55 +117,61 @@ def generate_dynamic_graph(car_data: pd.DataFrame, threshold: float=15.0) -> nx.
     each pair of cars and if the distance is less than or equal to threshold, it creates an
     edge between the two cars
     '''
-    dynamic_graph = nx.Graph()
-    #this will be used as the label for each new node, we start at 0
-    current_node = 0
+    snapshots = {
+        'edge_indices': [],
+        'features': [],
+        'targets': [],
+        'edge_weights': [],
+    }
     #tqdm adds a progress bar
-    for i in tqdm(range(len(car_data.index))):
-        #this is to make sure we don't add any nodes twice
-        added_nodes = {}
-        lat_lon_1 = (car_data['ID1_latitude'].iloc[i], car_data['ID1_longitude'].iloc[i])
-        lat_lon_2 = (car_data['ID2_latitude'].iloc[i], car_data['ID2_longitude'].iloc[i])
-        lat_lon_3 = (car_data['ID3_latitude'].iloc[i], car_data['ID3_longitude'].iloc[i])
-        lat_lon_4 = (car_data['ID4_latitude'].iloc[i], car_data['ID4_longitude'].iloc[i])
-        positions = [lat_lon_1, lat_lon_2, lat_lon_3, lat_lon_4]
+    for i in tqdm(range(0, len(car_data.index), 15)):
+        feature_1 = (car_data['ID1_latitude'].iloc[i], car_data['ID1_longitude'].iloc[i], car_data['ID1_altitude'].iloc[i], car_data['ID1_speed'].iloc[i], car_data['ID1_heading'].iloc[i])
+        feature_2 = (car_data['ID2_latitude'].iloc[i], car_data['ID2_longitude'].iloc[i], car_data['ID2_altitude'].iloc[i], car_data['ID2_speed'].iloc[i], car_data['ID2_heading'].iloc[i])
+        feature_3 = (car_data['ID3_latitude'].iloc[i], car_data['ID3_longitude'].iloc[i], car_data['ID3_altitude'].iloc[i], car_data['ID3_speed'].iloc[i], car_data['ID3_heading'].iloc[i])
+        feature_4 = (car_data['ID4_latitude'].iloc[i], car_data['ID4_longitude'].iloc[i], car_data['ID4_altitude'].iloc[i], car_data['ID4_speed'].iloc[i], car_data['ID4_heading'].iloc[i])
+        positions = [(feature_1[0], feature_1[1]), (feature_2[0], feature_2[1]), (feature_3[0], feature_3[1]), (feature_4[0], feature_4[1])]
+        #node attributes
+        features = np.array([
+            [feature_1],
+            [feature_2],
+            [feature_3],
+            [feature_4],
+        ])
+        edges = []
+        edge_weights = []
+        targets = []
         #check every pair of lat/lon
-        for j, position in enumerate(positions):
-            for k, other_position in enumerate(positions[j+1:]):
+        for j in range(len(positions)-1):
+            position = positions[j]
+            for k in range(j+1, len(positions)):
+                other_position = positions[k]
                 #if the type of lat/lon is str, it is not defined for the first car
                 #so we don't want to consider any pairs involving this car
                 #(the second car will be considered again in the outer loop)
                 if type(position[0]) == str or type(position[1]) == str:
                     break
-                #if we haven't already added the node, go ahead and add it
-                if position not in added_nodes:
-                    dynamic_graph.add_node(current_node, speed=car_data[f'ID{j+1}_speed'].iloc[i], heading=car_data[f'ID{j+1}_heading'].iloc[i])
-                    node_i = current_node
-                    added_nodes[position] = node_i
-                    current_node += 1
-                #otherwise, just get the previously added node
-                else:
-                    node_i = added_nodes[position]
                 #if the type of other lat/lon is a str, it is not defined, and we
                 #need to skip over that position
                 if type(other_position[0]) == str or type(other_position[1]) == str:
                     continue
-                #if the other_position is not in added_nodes, add a new node
-                if other_position not in added_nodes:
-                    dynamic_graph.add_node(current_node, speed=car_data[f'ID{k+1}_speed'].iloc[i], heading=car_data[f'ID{k+1}_heading'].iloc[i])
-                    node_j = current_node
-                    added_nodes[other_position] = node_j
-                    current_node += 1
-                #if the other_position is in added_nodes, lookup the node value
-                else:
-                    node_j = added_nodes[other_position]
                 #get the earth_distance (using the haversine formula) between the two positions
                 distance = earth_distance(position, other_position)
                 #if the distance between the two cars is less than or equal to our threshold,
                 #add an edge between the two nodes associated with those positions
                 if distance <= threshold:
-                    dynamic_graph.add_edge(node_i, node_j, time=df['gpstime'].iloc[i])
-    return dynamic_graph
+                    edges.append([j, k])
+                    edges.append([k, j])
+                    edge_weights.append(1)
+                    edge_weights.append(1)
+                targets.append(None)
+        edge_index = np.array(edges).T
+        edge_weights = np.array(edge_weights)
+        targets = np.array(targets)
+        snapshots['edge_indices'].append(edge_index)
+        snapshots['features'].append(features)
+        snapshots['edge_weights'].append(edge_weights)
+        snapshots['targets'].append(features)
+    return snapshots
 
 id_1 = collect_data('ID1')
 id_2 = collect_data('ID2', 'audi')
@@ -158,4 +181,68 @@ id_4 = collect_data('ID4', 'fiat')
 df = merge_data((id_1, id_2, id_3, id_4), on='gpstime')
 
 graph = generate_dynamic_graph(df)
-nx.write_gexf(graph, 'graph.gexf')
+
+dataset = DynamicGraphTemporalSignal(
+    edge_indices=graph['edge_indices'],
+    features=graph['features'],
+    edge_weights=graph['edge_weights'],
+    targets=graph['targets']
+)
+
+class AutoEncoder(torch.nn.Module):
+    def __init__(self, input_features):
+        super(AutoEncoder, self).__init__()
+        self.encoder = Sequential(
+            Linear(input_features, 32),
+            ReLU(),
+            Linear(32, 16),
+            ReLU(),
+            Linear(16, 8),
+        )
+        self.decoder = Sequential(
+            Linear(8, 16),
+            ReLU(),
+            Linear(16, 32),
+            ReLU(),
+            Linear(32, input_features),
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+
+class GAE(torch.nn.Module):
+    def __init__(self, node_features):
+        super(GAE, self).__init__()
+        self.recurrent = DCRNN(node_features, 64, 1)
+        self.auto_encoder = AutoEncoder(64)
+
+    def forward(self, x, edge_index, edge_weight):
+        x = self.recurrent(x, edge_index, edge_weight)
+        x = F.relu(x)
+        x = self.auto_encoder(x)
+        return x
+    
+model = GAE(len(dataset.features))
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+model.train()
+
+for epoch in tqdm(range(200)):
+    cost = 0
+    for time, snapshot in enumerate(dataset):
+        y_hat = model(snapshot.x, snapshot.edge_index, snapshot.edge_attr)
+        cost = cost + torch.mean((y_hat - snapshot.y)**2)
+    cost = cost / (time+1)
+    cost.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+
+model.eval()
+cost = 0
+for time, snapshot in enumerate(dataset):
+    y_hat = model(snapshot.x, snapshot.edge_index, snapshot.edge_attr)
+    cost = cost + torch.mean((y_hat - snapshot.y)**2)
+cost = cost / (time + 1)
+cost = cost.item()
+print('MSE: {:.4f}'.format(cost))
