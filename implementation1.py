@@ -6,9 +6,14 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Sequential, Linear, ReLU
+import torch_geometric.transforms as T
+from torch_geometric.nn.models import GAE
+from torch_geometric.transforms import RandomLinkSplit
+from torch_geometric.utils import train_test_split_edges, negative_sampling
+from torch_geometric.data import Data
 from torch_geometric_temporal.nn.recurrent import DCRNN
-from torch_geometric_temporal.signal import DynamicGraphTemporalSignal
+
+from torch_geometric.datasets import Planetoid
 
 def find_file(base_path: str, filename: str) -> str:
     '''
@@ -109,7 +114,7 @@ def earth_distance(lat_lon_1: 'tuple[float]', lat_lon_2: 'tuple[float]'):
 
     return c * R
     
-def generate_dynamic_graph(car_data: pd.DataFrame, threshold: float=15.0) -> dict:
+def generate_dynamic_graph(car_data: pd.DataFrame, threshold: float=15.0) -> 'list[Data]':
     '''
     Generates a dynamic graph from car data. This data should be collected and merged prior
     to being used as input. The algorithm adds a node for each car at each timestep if the 
@@ -117,12 +122,13 @@ def generate_dynamic_graph(car_data: pd.DataFrame, threshold: float=15.0) -> dic
     each pair of cars and if the distance is less than or equal to threshold, it creates an
     edge between the two cars
     '''
-    snapshots = {
-        'edge_indices': [],
-        'features': [],
-        'targets': [],
-        'edge_weights': [],
-    }
+    # snapshots = {
+    #     'edge_indices': [],
+    #     'features': [],
+    #     'targets': [],
+    #     'edge_weights': [],
+    # }
+    snapshots = []
     #tqdm adds a progress bar
     for i in tqdm(range(0, len(car_data.index), 15)):
         feature_1 = (car_data['ID1_latitude'].iloc[i], car_data['ID1_longitude'].iloc[i], car_data['ID1_altitude'].iloc[i], car_data['ID1_speed'].iloc[i], car_data['ID1_heading'].iloc[i])
@@ -131,15 +137,22 @@ def generate_dynamic_graph(car_data: pd.DataFrame, threshold: float=15.0) -> dic
         feature_4 = (car_data['ID4_latitude'].iloc[i], car_data['ID4_longitude'].iloc[i], car_data['ID4_altitude'].iloc[i], car_data['ID4_speed'].iloc[i], car_data['ID4_heading'].iloc[i])
         positions = [(feature_1[0], feature_1[1]), (feature_2[0], feature_2[1]), (feature_3[0], feature_3[1]), (feature_4[0], feature_4[1])]
         #node attributes
-        features = np.array([
-            [feature_1],
-            [feature_2],
-            [feature_3],
-            [feature_4],
-        ])
-        edges = []
-        edge_weights = []
-        targets = []
+        features = torch.tensor([
+            feature_1,
+            feature_2,
+            feature_3,
+            feature_4,
+        ], dtype=torch.float)
+        edges = [
+            [0,0], 
+            [0,0], 
+            [1,1], 
+            [1,1], 
+            [2,2], 
+            [2,2], 
+            [3,3], 
+            [3,3],
+        ]
         #check every pair of lat/lon
         for j in range(len(positions)-1):
             position = positions[j]
@@ -161,77 +174,101 @@ def generate_dynamic_graph(car_data: pd.DataFrame, threshold: float=15.0) -> dic
                 if distance <= threshold:
                     edges.append([j, k])
                     edges.append([k, j])
-                    edge_weights.append(1)
-                    edge_weights.append(1)
-                targets.append(None)
-        edge_index = np.array(edges).T
-        edge_weights = np.array(edge_weights)
-        targets = np.array(targets)
-        snapshots['edge_indices'].append(edge_index)
-        snapshots['features'].append(features)
-        snapshots['edge_weights'].append(edge_weights)
-        snapshots['targets'].append(features)
+        #edge_weights = torch.ones(len(edges,))
+        edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+        snapshot = Data(x=features, edge_index=edge_index)
+        snapshots.append(snapshot)
     return snapshots
 
 id_1 = collect_data('ID1')
 id_2 = collect_data('ID2', 'audi')
 id_3 = collect_data('ID3', 'nissan')
 id_4 = collect_data('ID4', 'fiat')
-
 df = merge_data((id_1, id_2, id_3, id_4), on='gpstime')
 
 graph = generate_dynamic_graph(df)
 
-dataset = DynamicGraphTemporalSignal(
-    edge_indices=graph['edge_indices'],
-    features=graph['features'],
-    edge_weights=graph['edge_weights'],
-    targets=graph['targets']
-)
+transform = RandomLinkSplit(is_undirected=True)
+dataset = []
+for snapshot in graph:
+    train, val, test = transform(snapshot)
+    dataset.append({
+        'train': train,
+        'val': val,
+        'test': test
+    })
 
-class AutoEncoder(torch.nn.Module):
-    def __init__(self, input_features):
-        super(AutoEncoder, self).__init__()
-        self.encoder = Sequential(
-            Linear(input_features, 32),
-            ReLU(),
-            Linear(32, 16),
-            ReLU(),
-            Linear(16, 8),
-        )
-        self.decoder = Sequential(
-            Linear(8, 16),
-            ReLU(),
-            Linear(16, 32),
-            ReLU(),
-            Linear(32, input_features),
-        )
-
-    def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return x
-
-class GAE(torch.nn.Module):
-    def __init__(self, node_features):
-        super(GAE, self).__init__()
-        self.recurrent = DCRNN(node_features, 64, 1)
-        self.auto_encoder = AutoEncoder(64)
-
+class RecurrentEncoder(torch.nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(RecurrentEncoder, self).__init__()
+        self.encoder1 = DCRNN(in_channels=in_channels, out_channels=2*out_channels, K=1)
+        self.encoder2 = DCRNN(in_channels=2*out_channels, out_channels=out_channels, K=1)
     def forward(self, x, edge_index):
-        x = self.recurrent(x, edge_index)
+        x = self.encoder1(x, edge_index)
         x = F.relu(x)
-        x = self.auto_encoder(x)
+        x = self.encoder2(x, edge_index)
         return x
     
-model = GAE(len(dataset.features[0]))
+out_channels = 2
+num_features = dataset[0]['train'].num_features
+epochs = 100
+
+model = GAE(RecurrentEncoder(num_features, out_channels))
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+
+def train():
+    model.train()
+    optimizer.zero_grad()
+    total_loss = 0.0
+    for snapshot in dataset:
+        x = snapshot['train'].x.to(device)
+        train_pos_edge_index = snapshot['train'].edge_index.to(device)
+        z = model.encode(x, train_pos_edge_index)
+        train_neg_edge_index = negative_sampling(train_pos_edge_index, z.size(0)).long().to(device)
+        loss = model.recon_loss(z, train_pos_edge_index, train_neg_edge_index)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss
+    return loss
+
+def test(pos_edge_indices, neg_edge_indices):
+    model.eval()
+    total_auc = 0.0
+    total_ap = 0.0
+    for i, snapshot in enumerate(dataset):
+        with torch.no_grad():
+            x = snapshot['test'].x.to(device)
+            train_pos_edge_index = snapshot['train'].edge_index.to(device)
+            z = model.encode(x, train_pos_edge_index)
+        auc, ap = model.test(z, pos_edge_indices[i], neg_edge_indices[i])
+        total_auc += auc
+        total_ap += ap
+    return total_auc / len(pos_edge_indices), total_ap / len(pos_edge_indices)
+
+for epoch in range(1, epochs+1):
+    loss = train()
+    pos_edge_indices = [data['test'].edge_index for data in dataset]
+    neg_edge_indices = [negative_sampling(data['test'].edge_index, 4) for data in dataset]
+    auc, ap = test(pos_edge_indices, neg_edge_indices)
+    print('Epoch: {:03d}, AUC: {:.4f}, AP: {:.4f}'.format(epoch, auc, ap))
+'''
+model = GAE(len(dataset.features[0]) + 1)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 model.train()
+
 
 for epoch in tqdm(range(200)):
     cost = 0
     for time, snapshot in enumerate(dataset):
+        # squeeze dimension to match expected tensor size
+        snapshot.x = snapshot.x.squeeze(1)
         y_hat = model(snapshot.x, snapshot.edge_index)
+        print(f'>>> y_hat size: {y_hat.shape}')
+        print(f'>>> snapshot.x size: {snapshot.x.shape}')
+        print(f'>>> snapshot.y size: {snapshot.y.shape}')
         cost = cost + torch.mean((y_hat - snapshot.y)**2)
     cost = cost / (time+1)
     cost.backward()
@@ -241,8 +278,9 @@ for epoch in tqdm(range(200)):
 model.eval()
 cost = 0
 for time, snapshot in enumerate(dataset):
-    y_hat = model(snapshot.x, snapshot.edge_index)
+    y_hat = model(snapshot.x, snapshot.edge_index, snapshot.edge_attr)
     cost = cost + torch.mean((y_hat - snapshot.y)**2)
 cost = cost / (time + 1)
 cost = cost.item()
 print('MSE: {:.4f}'.format(cost))
+'''
